@@ -1,0 +1,31 @@
+<svg width="200" height="200" viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg">
+  <!-- Background -->
+  <rect width="200" height="200" fill="#f97316" rx="10"/>
+  
+  <!-- Circle accent -->
+  <circle cx="100" cy="100" r="90" fill="none" stroke="#ffffff" stroke-width="3" opacity="0.3"/>
+  
+  <!-- Store icon -->
+  <g transform="translate(100, 100)">
+    <!-- Building outline -->
+    <rect x="-40" y="-20" width="80" height="60" fill="none" stroke="#ffffff" stroke-width="2" rx="5"/>
+    
+    <!-- Door -->
+    <rect x="-15" y="0" width="30" height="40" fill="none" stroke="#ffffff" stroke-width="2" rx="3"/>
+    
+    <!-- Door handle -->
+    <circle cx="12" cy="20" r="2" fill="#ffffff"/>
+    
+    <!-- Windows -->
+    <rect x="-35" y="-15" width="12" height="12" fill="none" stroke="#ffffff" stroke-width="1.5" rx="2"/>
+    <rect x="-35" y="5" width="12" height="12" fill="none" stroke="#ffffff" stroke-width="1.5" rx="2"/>
+    <rect x="23" y="-15" width="12" height="12" fill="none" stroke="#ffffff" stroke-width="1.5" rx="2"/>
+    <rect x="23" y="5" width="12" height="12" fill="none" stroke="#ffffff" stroke-width="1.5" rx="2"/>
+    
+    <!-- Roof -->
+    <polygon points="-45,0 0,-30 45,0" fill="none" stroke="#ffffff" stroke-width="2"/>
+  </g>
+  
+  <!-- Text -->
+  <text x="100" y="180" font-family="Arial, sans-serif" font-size="14" font-weight="bold" text-anchor="middle" fill="#ffffff">Store Logo</text>
+</svg>

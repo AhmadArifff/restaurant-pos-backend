@@ -1,0 +1,618 @@
+const db = require('../config/db');
+
+// ── Summary stok master (saldo saat ini per bahan) ────────────
+exports.getSummary = async (req, res) => {
+  try {
+    const [rows] = await db.query(`
+      SELECT
+        si.id, si.name, si.unit, si.min_stock,
+        si.price_per_unit,
+        COALESCE(SUM(CASE WHEN ms.type='in'  THEN ms.qty       ELSE 0 END), 0) AS total_in,
+        COALESCE(SUM(CASE WHEN ms.type='out' THEN ms.qty       ELSE 0 END), 0) AS total_out,
+        COALESCE(SUM(CASE WHEN ms.type='in'  THEN ms.qty       ELSE 0 END), 0) -
+        COALESCE(SUM(CASE WHEN ms.type='out' THEN ms.qty       ELSE 0 END), 0) AS current_stock,
+        COALESCE(SUM(CASE WHEN ms.type='in'  THEN ms.total_cost ELSE 0 END), 0) AS total_cost_in,
+        COALESCE(SUM(CASE WHEN ms.type='out' THEN ms.total_cost ELSE 0 END), 0) AS total_cost_out,
+        -- Harga per unit dari pembelian terakhir
+        (SELECT ms2.cost_per_unit FROM main_stock ms2
+         WHERE ms2.stock_item_id = si.id AND ms2.type = 'in'
+         ORDER BY ms2.created_at DESC LIMIT 1) AS latest_cost_per_unit
+      FROM stock_items si
+      LEFT JOIN main_stock ms ON ms.stock_item_id = si.id
+      GROUP BY si.id, si.name, si.unit, si.min_stock, si.price_per_unit
+      ORDER BY si.name ASC
+    `);
+    res.json(rows);
+  } catch (err) { res.status(500).json({ message: err.message }); }
+};
+
+exports.getMonthly = async (req, res) => {
+  try {
+    const { month, year } = req.query;
+    const y = Number(year  || new Date().getFullYear());
+    const m = Number(month || new Date().getMonth() + 1);
+
+    const [rows] = await db.query(`
+      SELECT
+        ms.id, ms.type, ms.source, ms.qty, ms.cost_per_unit,
+        ms.total_cost, ms.note, ms.created_at,
+        si.name AS item_name, si.unit,
+        u.name  AS created_by_name
+      FROM main_stock ms
+      JOIN stock_items si ON ms.stock_item_id = si.id
+      JOIN users u         ON ms.created_by = u.id
+      WHERE YEAR(ms.created_at) = ? AND MONTH(ms.created_at) = ?
+      ORDER BY ms.created_at DESC
+    `, [y, m]);
+    res.json(rows);
+  } catch (err) { res.status(500).json({ message: err.message }); }
+};
+
+// ── Rekap harian pengeluaran ──────────────────────────────────
+// exports.getDaily = async (req, res) => {
+//   try {
+//     const { date } = req.query;
+//     const d = date || new Date().toISOString().split('T')[0];
+
+//     const [rows] = await db.query(`
+//       SELECT
+//         ms.id, ms.type, ms.source, ms.qty, ms.cost_per_unit,
+//         ms.total_cost, ms.note, ms.created_at,
+//         si.name AS item_name, si.unit,
+//         u.name  AS created_by_name
+//       FROM main_stock ms
+//       JOIN stock_items si ON ms.stock_item_id = si.id
+//       JOIN users u         ON ms.created_by = u.id
+//       WHERE DATE(ms.created_at) = ? AND ms.type = 'out'
+//       ORDER BY ms.created_at DESC
+//     `, [d]);
+//     res.json(rows);
+//   } catch (err) { res.status(500).json({ message: err.message }); }
+// };
+
+// exports.getDaily = async (req, res) => {
+//   try {
+//     const { date_from, date_to } = req.query;
+//     const from = date_from || new Date().toISOString().split('T')[0];
+//     const to   = date_to   || from;
+
+//     const [rows] = await db.query(`
+//       SELECT
+//         ms.*,
+//         si.name  AS item_name,
+//         si.unit,
+//         u.name   AS created_by_name,
+//         -- Cari user target dari stock_requests jika source=request atau adjustment
+//         COALESCE(
+//           (SELECT ru.name FROM stock_requests sr
+//            JOIN users ru ON sr.user_id = ru.id
+//            WHERE sr.id = ms.reference_id LIMIT 1),
+//           u.name
+//         ) AS target_user_name,
+//         COALESCE(
+//           (SELECT sra.name FROM stock_requests sr
+//            JOIN users sra ON sr.created_by_admin = sra.id
+//            WHERE sr.id = ms.reference_id AND sr.created_by_admin IS NOT NULL LIMIT 1),
+//           NULL
+//         ) AS admin_name
+//       FROM main_stock ms
+//       JOIN stock_items si ON ms.stock_item_id = si.id
+//       JOIN users u         ON ms.created_by = u.id
+//       WHERE ms.type = 'out' AND DATE(ms.created_at) BETWEEN ? AND ?
+//       ORDER BY ms.created_at DESC
+//     `, [from, to]);
+//     res.json(rows);
+//   } catch (err) { res.status(500).json({ message: err.message }); }
+// };
+
+// Di getDaily controller, tambah filter user_id opsional
+// exports.getDaily = async (req, res) => {
+//   try {
+//     const { date_from, date_to, user_id } = req.query;
+//     const from = date_from || new Date().toISOString().split('T')[0];
+//     const to   = date_to   || from;
+
+//     // Untuk filter kasir: filter berdasarkan user_id di stock_requests
+//     const userJoinCondition = user_id
+//       ? `AND (
+//           sr.user_id = ${Number(user_id)}
+//           OR (sr.id IS NULL AND ms.created_by = ${Number(user_id)})
+//          )`
+//       : '';
+
+//     const [rows] = await db.query(`
+//       SELECT
+//         ms.id,
+//         ms.qty,
+//         ms.cost_per_unit,
+//         ms.total_cost,
+//         ms.note,
+//         ms.created_at,
+//         'out'      AS type,
+//         'approved' AS request_status,
+//         si.name    AS item_name,
+//         si.unit,
+//         approver.name     AS approver_name,
+//         COALESCE(kasir_u.name, creator.name) AS target_user_name,
+//         CASE
+//           WHEN sr.created_by_admin IS NOT NULL THEN admin_creator.name
+//           ELSE NULL
+//         END AS admin_name
+//       FROM main_stock ms
+//       JOIN stock_items si         ON ms.stock_item_id = si.id
+//       JOIN users creator          ON ms.created_by = creator.id
+//       LEFT JOIN stock_requests sr ON sr.id = ms.reference_id
+//                                   AND ms.source = 'request'
+//       LEFT JOIN users kasir_u     ON sr.user_id = kasir_u.id
+//       LEFT JOIN users admin_creator ON sr.created_by_admin = admin_creator.id
+//       LEFT JOIN users approver    ON sr.approved_by = approver.id
+//       WHERE ms.type = 'out'
+//         AND DATE(ms.created_at) BETWEEN ? AND ?
+//         ${userJoinCondition}
+//       ORDER BY ms.created_at DESC
+//     `, [from, to]);
+
+//     // Pending & rejected (hanya untuk admin view — user_id kosong)
+//     let pendingRows = [];
+//     if (!user_id) {
+//       const [pending] = await db.query(`
+//         SELECT
+//           sri.id,
+//           sri.qty_requested AS qty,
+//           sri.cost_per_unit,
+//           (sri.qty_requested * sri.cost_per_unit) AS total_cost,
+//           sr.note,
+//           sr.created_at,
+//           'pending_out' AS type,
+//           sr.status     AS request_status,
+//           si.name       AS item_name,
+//           si.unit,
+//           approver.name       AS approver_name,
+//           kasir_u.name        AS target_user_name,
+//           CASE
+//             WHEN sr.created_by_admin IS NOT NULL THEN admin_creator.name
+//             ELSE NULL
+//           END AS admin_name
+//         FROM stock_requests sr
+//         JOIN stock_request_items sri   ON sri.request_id = sr.id
+//         JOIN stock_items si            ON sri.stock_item_id = si.id
+//         JOIN users kasir_u             ON sr.user_id = kasir_u.id
+//         LEFT JOIN users admin_creator  ON sr.created_by_admin = admin_creator.id
+//         LEFT JOIN users approver       ON sr.approved_by = approver.id
+//         WHERE sr.status IN ('pending', 'rejected')
+//           AND DATE(sr.created_at) BETWEEN ? AND ?
+//         ORDER BY sr.created_at DESC
+//       `, [from, to]);
+//       pendingRows = pending;
+//     }
+
+//     res.json([...rows, ...pendingRows]);
+//   } catch (err) { res.status(500).json({ message: err.message }); }
+// };
+
+// Di mainstockcontroller.js — getDaily yang diperluas
+// ── Di mainstockcontroller.js — getDaily yang diperluas ──
+exports.getDaily = async (req, res) => {
+  try {
+    const { date_from, date_to, user_id, type_filter } = req.query;
+    const from = date_from || new Date().toISOString().split('T')[0];
+    const to   = date_to   || from;
+    const uid  = user_id ? Number(user_id) : null;
+
+    const results = [];
+
+    // ── 1. Pengeluaran approved dari main_stock ──────────────────────────
+    if (!type_filter || ['all', 'approved', 'manual'].includes(type_filter)) {
+      let userCond     = '';
+      let manualCond   = '';
+
+      if (uid) {
+        userCond = `AND (sr.user_id = ${uid} OR (sr.id IS NULL AND ms.created_by = ${uid}))`;
+      }
+      if (type_filter === 'manual') {
+        manualCond = `AND ms.source = 'request'`;
+      }
+
+      const [rows] = await db.query(`
+        SELECT
+          ms.id,
+          ms.qty,
+          ms.cost_per_unit,
+          ms.total_cost,
+          ms.note,
+          ms.created_at,
+          'approved'  AS request_status,
+          'out'       AS type,
+          si.name     AS item_name,
+          si.unit,
+          creator.name                                             AS created_by_name,
+          approver.name                                            AS approver_name,
+          COALESCE(kasir_u.name, creator.name)                    AS target_user_name,
+          CASE WHEN sr.created_by_admin IS NOT NULL
+               THEN admin_c.name ELSE NULL END                    AS admin_name
+        FROM main_stock ms
+        JOIN  stock_items si         ON ms.stock_item_id = si.id
+        JOIN  users creator          ON ms.created_by    = creator.id
+        LEFT JOIN stock_requests  sr ON sr.id = ms.reference_id AND ms.source = 'request'
+        LEFT JOIN users kasir_u      ON sr.user_id          = kasir_u.id
+        LEFT JOIN users admin_c      ON sr.created_by_admin = admin_c.id
+        LEFT JOIN users approver     ON sr.approved_by      = approver.id
+        WHERE ms.type = 'out'
+          AND DATE(ms.created_at) BETWEEN ? AND ?
+          ${manualCond}
+          ${userCond}
+        ORDER BY ms.created_at DESC
+      `, [from, to]);
+
+      results.push(...rows);
+    }
+
+    // ── 2. Pengajuan pending & rejected ──────────────────────────────────
+    if (!type_filter || ['all', 'pending', 'rejected'].includes(type_filter)) {
+      const userReqCond = uid ? `AND sr.user_id = ${uid}` : '';
+      const statusCond  =
+        type_filter === 'pending'  ? `AND sr.status = 'pending'`  :
+        type_filter === 'rejected' ? `AND sr.status = 'rejected'` :
+                                     `AND sr.status IN ('pending','rejected')`;
+
+      const [rows] = await db.query(`
+        SELECT
+          sri.id,
+          sri.qty_requested                               AS qty,
+          sri.cost_per_unit,
+          (sri.qty_requested * sri.cost_per_unit)         AS total_cost,
+          sr.note,
+          sr.created_at,
+          sr.status                                       AS request_status,
+          'pending_out'                                   AS type,
+          si.name                                         AS item_name,
+          si.unit,
+          kasir_u.name                                    AS created_by_name,
+          approver.name                                   AS approver_name,
+          kasir_u.name                                    AS target_user_name,
+          CASE WHEN sr.created_by_admin IS NOT NULL
+               THEN admin_c.name ELSE NULL END            AS admin_name
+        FROM stock_requests sr
+        JOIN  stock_request_items sri ON sri.request_id    = sr.id
+        JOIN  stock_items si          ON sri.stock_item_id = si.id
+        JOIN  users kasir_u           ON sr.user_id        = kasir_u.id
+        LEFT JOIN users admin_c       ON sr.created_by_admin = admin_c.id
+        LEFT JOIN users approver      ON sr.approved_by    = approver.id
+        WHERE 1=1
+          ${statusCond}
+          AND DATE(sr.created_at) BETWEEN ? AND ?
+          ${userReqCond}
+        ORDER BY sr.created_at DESC
+      `, [from, to]);
+
+      results.push(...rows);
+    }
+
+    // ── 3. Transaksi POS ─────────────────────────────────────────────────
+    // Dibungkus try-catch terpisah agar error di sini tidak crash seluruh endpoint
+    if (!type_filter || ['all', 'transaction'].includes(type_filter)) {
+      try {
+        // Deteksi nama kolom user di tabel transactions secara dinamis
+        const [cols] = await db.query(`
+          SELECT COLUMN_NAME
+          FROM INFORMATION_SCHEMA.COLUMNS
+          WHERE TABLE_SCHEMA = DATABASE()
+            AND TABLE_NAME   = 'transactions'
+            AND COLUMN_NAME  IN ('cashier_id','user_id','created_by','kasir_id','operator_id')
+        `);
+
+        // Ambil kolom pertama yang ditemukan — prioritas: cashier_id > user_id > created_by
+        const priority  = ['cashier_id', 'user_id', 'created_by', 'kasir_id', 'operator_id'];
+        const found     = priority.find(p => cols.some(c => c.COLUMN_NAME === p));
+
+        if (!found) {
+          // Tidak ada kolom user yang dikenal → skip section ini, jangan crash
+          console.warn('[getDaily] Tabel transactions tidak memiliki kolom user yang dikenal:', cols.map(c=>c.COLUMN_NAME));
+        } else {
+          // Cek apakah product_ingredients ada kolom qty
+          const [piCols] = await db.query(`
+            SELECT COLUMN_NAME
+            FROM INFORMATION_SCHEMA.COLUMNS
+            WHERE TABLE_SCHEMA = DATABASE()
+              AND TABLE_NAME   = 'product_ingredients'
+              AND COLUMN_NAME  IN ('qty','quantity','amount')
+          `);
+          const piQtyCol = piCols[0]?.COLUMN_NAME || 'qty';
+
+          const userTxCond = uid ? `AND t.${found} = ${uid}` : '';
+
+          const [rows] = await db.query(`
+            SELECT
+              CONCAT('tx-', t.id, '-', pi.stock_item_id)   AS id,
+              (ti.qty * pi.${piQtyCol})                     AS qty,
+              COALESCE(si.price_per_unit, 0)                AS cost_per_unit,
+              (ti.qty * pi.${piQtyCol} * COALESCE(si.price_per_unit, 0)) AS total_cost,
+              CONCAT('Transaksi · ', p.name, ' ×', ti.qty) AS note,
+              t.created_at,
+              'approved'    AS request_status,
+              'transaction' AS type,
+              si.name       AS item_name,
+              si.unit,
+              kasir_u.name  AS created_by_name,
+              NULL          AS approver_name,
+              kasir_u.name  AS target_user_name,
+              NULL          AS admin_name
+            FROM transactions t
+            JOIN  transaction_items ti    ON ti.transaction_id = t.id
+            JOIN  products p              ON p.id              = ti.product_id
+            JOIN  product_ingredients pi  ON pi.product_id     = ti.product_id
+            JOIN  stock_items si          ON si.id             = pi.stock_item_id
+            JOIN  users kasir_u           ON kasir_u.id        = t.${found}
+            WHERE DATE(t.created_at) BETWEEN ? AND ?
+              ${userTxCond}
+            ORDER BY t.created_at DESC
+          `, [from, to]);
+
+          results.push(...rows);
+        }
+      } catch (txErr) {
+        // Log error transaksi POS tapi jangan crash seluruh response
+        console.error('[getDaily] Error saat query transaksi POS:', txErr.message);
+        // Tetap lanjut, results dari section 1 & 2 tetap dikirim
+      }
+    }
+
+    // Sort gabungan DESC berdasarkan tanggal
+    results.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+
+    res.json(results);
+
+  } catch (err) {
+    console.error('[getDaily] Fatal error:', err);
+    res.status(500).json({ message: err.message, stack: process.env.NODE_ENV === 'development' ? err.stack : undefined });
+  }
+};
+
+// ── Helper: recalculate stock & avg price untuk satu bahan ──
+async function recalcStockItem(conn, stockItemId) {
+  const [[calc]] = await conn.query(`
+    SELECT
+      GREATEST(0,
+        COALESCE(SUM(CASE WHEN type='in'  THEN qty        ELSE 0 END), 0) -
+        COALESCE(SUM(CASE WHEN type='out' THEN qty        ELSE 0 END), 0)
+      ) AS correct_stock,
+      COALESCE(SUM(CASE WHEN type='in' THEN total_cost ELSE 0 END), 0) AS total_cost_in,
+      COALESCE(SUM(CASE WHEN type='in' THEN qty        ELSE 0 END), 0) AS total_qty_in
+    FROM main_stock
+    WHERE stock_item_id = ?
+  `, [stockItemId]);
+
+  const correctStock  = Number(calc.correct_stock);
+  const totalCostIn   = Number(calc.total_cost_in);
+  const totalQtyIn    = Number(calc.total_qty_in);
+  const avgPrice      = totalQtyIn > 0
+    ? Math.round(totalCostIn / totalQtyIn)
+    : 0;
+
+  await conn.query(`
+    UPDATE stock_items
+    SET stock          = ?,
+        price_per_unit = ?,
+        total_price    = ?
+    WHERE id = ?
+  `, [correctStock, avgPrice, correctStock * avgPrice, stockItemId]);
+
+  return { correctStock, avgPrice };
+}
+
+// ── Tambah pemasukan stok (pembelanjaan) ──────────────────────
+exports.addPurchase = async (req, res) => {
+  const conn = await db.getConnection();
+  try {
+    await conn.beginTransaction();
+    const { items, note } = req.body;
+
+    const inserted = [];
+    for (const item of items) {
+      const totalCost = Number(item.qty) * Number(item.cost_per_unit);
+
+      // 1. Insert ke main_stock
+      const [r] = await conn.query(`
+        INSERT INTO main_stock
+          (stock_item_id, qty, cost_per_unit, total_cost, type, source, note, created_by)
+        VALUES (?, ?, ?, ?, 'in', 'purchase', ?, ?)
+      `, [item.stock_item_id, item.qty, item.cost_per_unit, totalCost, note || null, req.user.id]);
+
+      // 2. Recalculate otomatis
+      await recalcStockItem(conn, item.stock_item_id);
+
+      inserted.push(r.insertId);
+    }
+
+    await conn.commit();
+    res.json({ message: 'Pemasukan stok berhasil', inserted });
+  } catch (err) {
+    await conn.rollback();
+    res.status(500).json({ message: err.message });
+  } finally {
+    conn.release();
+  }
+};
+
+exports.updatePurchase = async (req, res) => {
+  const conn = await db.getConnection();
+  try {
+    await conn.beginTransaction();
+    const { id } = req.params;
+    const { qty, cost_per_unit, note } = req.body;
+
+    const [[old]] = await conn.query(
+      'SELECT * FROM main_stock WHERE id = ? AND type = "in" AND source = "purchase"', [id]
+    );
+    if (!old) {
+      await conn.rollback();
+      return res.status(404).json({ message: 'Tidak ditemukan' });
+    }
+
+    // 1. Update main_stock
+    await conn.query(
+      `UPDATE main_stock SET qty = ?, cost_per_unit = ?, total_cost = ?, note = ? WHERE id = ?`,
+      [qty, cost_per_unit, Number(qty) * Number(cost_per_unit), note || null, id]
+    );
+
+    // 2. Recalculate otomatis
+    await recalcStockItem(conn, old.stock_item_id);
+
+    await conn.commit();
+    res.json({ message: 'Berhasil diupdate' });
+  } catch (err) {
+    await conn.rollback();
+    res.status(500).json({ message: err.message });
+  } finally {
+    conn.release();
+  }
+};
+
+exports.deletePurchase = async (req, res) => {
+  const conn = await db.getConnection();
+  try {
+    await conn.beginTransaction();
+    const { id } = req.params;
+
+    const [[row]] = await conn.query(
+      'SELECT * FROM main_stock WHERE id = ? AND type = "in" AND source = "purchase"', [id]
+    );
+    if (!row) {
+      await conn.rollback();
+      return res.status(404).json({ message: 'Tidak ditemukan' });
+    }
+
+    // 1. Hapus dari main_stock
+    await conn.query('DELETE FROM main_stock WHERE id = ?', [id]);
+
+    // 2. Recalculate otomatis
+    await recalcStockItem(conn, row.stock_item_id);
+
+    await conn.commit();
+    res.json({ message: 'Berhasil dihapus' });
+  } catch (err) {
+    await conn.rollback();
+    res.status(500).json({ message: err.message });
+  } finally {
+    conn.release();
+  }
+};
+
+exports.addManualOut = async (req, res) => {
+  const conn = await db.getConnection();
+  try {
+    await conn.beginTransaction();
+    const { items, note, user_id } = req.body;
+    const targetUserId = (req.user.role === 'admin' && user_id) ? Number(user_id) : req.user.id;
+    const adminId      = req.user.id;
+
+    // ── Validasi stok dulu ──
+    for (const item of items) {
+      const [[si]] = await conn.query(
+        'SELECT id, stock, name FROM stock_items WHERE id = ?',
+        [item.stock_item_id]
+      );
+      if (!si) {
+        await conn.rollback();
+        return res.status(404).json({ message: `Bahan id ${item.stock_item_id} tidak ditemukan` });
+      }
+      if (Number(si.stock) < Number(item.qty)) {
+        await conn.rollback();
+        return res.status(400).json({
+          message: `Stok ${si.name} tidak cukup (tersedia: ${si.stock})`
+        });
+      }
+    }
+
+    // ── Cari request PENDING hari ini untuk user ini ──
+    const today = new Date().toISOString().split('T')[0];
+    // const [[existingPending]] = await conn.query(
+    //   'SELECT id FROM stock_requests WHERE user_id = ? AND date = ? AND status = "pending"',
+    //   [targetUserId, today]
+    // );
+    // Cek pending saja — boleh buat baru jika sebelumnya rejected/approved
+    const [[existingPending]] = await conn.query(
+      'SELECT id FROM stock_requests WHERE user_id = ? AND date = ? AND status = "pending"',
+      [targetUserId, today]
+    );
+
+    let reqId;
+
+    if (existingPending) {
+      reqId = existingPending.id;
+
+      // Update note saja
+      if (note) {
+        await conn.query(
+          'UPDATE stock_requests SET note = ? WHERE id = ?',
+          [note, reqId]
+        );
+      }
+
+      // ── MERGE items: update qty jika sudah ada, insert jika belum ──
+      for (const item of items) {
+        const [[si]] = await conn.query(
+          'SELECT price_per_unit FROM stock_items WHERE id = ?',
+          [item.stock_item_id]
+        );
+
+        // Cek apakah stock_item_id ini sudah ada di request
+        const [[existing]] = await conn.query(
+          'SELECT id, qty_requested FROM stock_request_items WHERE request_id = ? AND stock_item_id = ?',
+          [reqId, item.stock_item_id]
+        );
+
+        if (existing) {
+          // Tambahkan qty — bukan replace
+          const newQty = Number(existing.qty_requested) + Number(item.qty);
+          await conn.query(
+            'UPDATE stock_request_items SET qty_requested = ? WHERE id = ?',
+            [newQty, existing.id]
+          );
+        } else {
+          // Insert baru
+          await conn.query(`
+            INSERT INTO stock_request_items
+              (request_id, stock_item_id, qty_requested, cost_per_unit)
+            VALUES (?, ?, ?, ?)
+          `, [reqId, item.stock_item_id, Number(item.qty), si?.price_per_unit || 0]);
+        }
+      }
+
+    } else {
+      // ── Tidak ada pending → buat request baru ──
+      // (Boleh buat baru meski sudah ada yang approved di hari yang sama)
+      const [reqResult] = await conn.query(
+        'INSERT INTO stock_requests (user_id, date, status, note, created_by_admin) VALUES (?, ?, "pending", ?, ?)',
+        [targetUserId, today, note || null, adminId]
+      );
+      reqId = reqResult.insertId;
+
+      // Insert semua items
+      for (const item of items) {
+        const [[si]] = await conn.query(
+          'SELECT price_per_unit FROM stock_items WHERE id = ?',
+          [item.stock_item_id]
+        );
+        await conn.query(`
+          INSERT INTO stock_request_items
+            (request_id, stock_item_id, qty_requested, cost_per_unit)
+          VALUES (?, ?, ?, ?)
+        `, [reqId, item.stock_item_id, Number(item.qty), si?.price_per_unit || 0]);
+      }
+    }
+
+    await conn.commit();
+    res.json({
+      message: existingPending
+        ? 'Pengajuan diperbarui (item ditambahkan ke pengajuan yang ada)'
+        : 'Pengajuan pengeluaran berhasil dibuat',
+      request_id: reqId,
+    });
+  } catch (err) {
+    await conn.rollback();
+    res.status(500).json({ message: err.message });
+  } finally {
+    conn.release();
+  }
+};
