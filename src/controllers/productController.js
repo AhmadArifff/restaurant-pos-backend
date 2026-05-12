@@ -28,9 +28,42 @@ exports.getAll = async (req, res) => {
       `, [p.id]);
       p.ingredients = ings;
 
-      // Hitung stok produk = min(floor(bahan/qty_per_produk))
+      // Hitung stok produk dari:
+      // 1. Stok gudang (main_stock)
+      // 2. Stok yang sudah di-approve dari kasir (qty_approved - qty_used)
       if (ings.length > 0) {
-        p.stock = Math.min(...ings.map(i => Math.floor(i.stock / i.qty)));
+        let minStock = Infinity;
+
+        for (const ing of ings) {
+          // Total dari gudang
+          const warehouseStock = ing.stock || 0;
+
+          // Total approved dari semua kasir/user
+          const [[approvedResult]] = await db.query(`
+            SELECT COALESCE(SUM(sri.qty_approved), 0) AS total_approved
+            FROM stock_requests sr
+            JOIN stock_request_items sri ON sri.request_id = sr.id
+            WHERE sr.status = 'approved'
+              AND sri.stock_item_id = ?
+              AND sri.qty_approved IS NOT NULL
+          `, [ing.stock_item_id]);
+
+          // Total yang sudah dipakai di semua transaksi
+          const [[usedResult]] = await db.query(`
+            SELECT COALESCE(SUM(ti.qty * pi.qty), 0) AS total_used
+            FROM transaction_items ti
+            JOIN transactions t ON ti.transaction_id = t.id
+            JOIN product_ingredients pi ON pi.product_id = ti.product_id
+              AND pi.stock_item_id = ?
+          `, [ing.stock_item_id]);
+
+          const approvedStock = Math.max(0, Number(approvedResult.total_approved) - Number(usedResult.total_used));
+          const totalAvailable = warehouseStock + approvedStock;
+          const portionsCanMake = Math.floor(totalAvailable / ing.qty);
+          minStock = Math.min(minStock, portionsCanMake);
+        }
+
+        p.stock = minStock === Infinity ? 0 : minStock;
       } else {
         p.stock = 0;
       }
@@ -148,7 +181,7 @@ exports.getMyStock = async (req, res) => {
     for (const p of products) {
       // Ambil ingredients produk
       const [ings] = await db.query(`
-        SELECT pi.qty, si.id AS stock_item_id, si.name AS ingredient_name, si.unit
+        SELECT pi.qty, si.id AS stock_item_id, si.name AS ingredient_name, si.unit, si.stock
         FROM product_ingredients pi
         JOIN stock_items si ON pi.stock_item_id = si.id
         WHERE pi.product_id = ?
@@ -161,11 +194,14 @@ exports.getMyStock = async (req, res) => {
         continue;
       }
 
-      // Hitung stok milik kasir ini dari approved requests
-      // Stok kasir = total qty approved - total qty yang sudah dipakai transaksi
+      // Hitung stok milik kasir ini dari approved requests + warehouse inventory
+      // Stok kasir = (total qty approved + warehouse) - total qty yang sudah dipakai transaksi
       const stockPerItem = {};
 
       for (const ing of ings) {
+        // Stok dari gudang
+        const warehouseStock = ing.stock || 0;
+
         // Total approved untuk kasir ini
         const [[approved]] = await db.query(`
           SELECT COALESCE(SUM(sri.qty_approved), 0) AS total_approved
@@ -187,8 +223,9 @@ exports.getMyStock = async (req, res) => {
           WHERE t.created_by = ?
         `, [ing.stock_item_id, userId]);
 
-        const remaining = Math.max(0, Number(approved.total_approved) - Number(used.total_used));
-        stockPerItem[ing.stock_item_id] = remaining;
+        const approvedStock = Math.max(0, Number(approved.total_approved) - Number(used.total_used));
+        const totalAvailable = warehouseStock + approvedStock;
+        stockPerItem[ing.stock_item_id] = totalAvailable;
       }
 
       // Stok produk = min dari semua bahan / qty per produk
@@ -290,7 +327,7 @@ exports.getStockAllUsers = async (req, res) => {
 
     for (const p of products) {
       const [ings] = await db.query(`
-        SELECT pi.qty, si.id AS stock_item_id, si.name AS ingredient_name, si.unit
+        SELECT pi.qty, si.id AS stock_item_id, si.name AS ingredient_name, si.unit, si.stock
         FROM product_ingredients pi
         JOIN stock_items si ON pi.stock_item_id = si.id
         WHERE pi.product_id = ?
@@ -308,6 +345,10 @@ exports.getStockAllUsers = async (req, res) => {
         let canMake = Infinity;
 
         for (const ing of ings) {
+          // Stok dari gudang (warehouse inventory)
+          const warehouseStock = ing.stock || 0;
+
+          // Total approved untuk user ini
           const [[approved]] = await db.query(`
             SELECT COALESCE(SUM(sri.qty_approved), 0) AS total
             FROM stock_requests sr
@@ -317,6 +358,7 @@ exports.getStockAllUsers = async (req, res) => {
               AND sri.qty_approved IS NOT NULL
           `, [u.id, ing.stock_item_id]);
 
+          // Total sudah dipakai di transaksi user ini
           const [[used]] = await db.query(`
             SELECT COALESCE(SUM(ti.qty * pi.qty), 0) AS total
             FROM transaction_items ti
@@ -327,8 +369,9 @@ exports.getStockAllUsers = async (req, res) => {
             WHERE t.created_by = ?
           `, [ing.stock_item_id, u.id]);
 
-          const remaining = Math.max(0, Number(approved.total) - Number(used.total));
-          canMake = Math.min(canMake, Math.floor(remaining / ing.qty));
+          const approvedStock = Math.max(0, Number(approved.total) - Number(used.total));
+          const totalAvailable = warehouseStock + approvedStock;
+          canMake = Math.min(canMake, Math.floor(totalAvailable / ing.qty));
         }
 
         stockByUser.push({
