@@ -215,10 +215,12 @@ exports.getMyStock = async (req, res) => {
         `, [userId, ing.stock_item_id]);
 
         // Total sudah dipakai di transaksi kasir ini
+        // USED_STOCK_BY_OWNER_SQL returns column alias 'total' (COALESCE(SUM(...)) AS total)
         const [[used]] = await db.query(USED_STOCK_BY_OWNER_SQL, [ing.stock_item_id, userId]);
 
         // Stok = approved - used (TIDAK termasuk warehouse stock)
-        const approvedStock = Math.max(0, Number(approved.total_approved) - Number(used.total_used));
+        // BUG FIX: changed from used.total_used to used.total to match SQL alias
+        const approvedStock = Math.max(0, Number(approved.total_approved) - Number(used.total));
         stockPerItem[ing.stock_item_id] = approvedStock;
       }
 

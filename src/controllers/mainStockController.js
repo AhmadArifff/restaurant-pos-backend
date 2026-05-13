@@ -202,50 +202,140 @@ exports.getDaily = async (req, res) => {
     const results = [];
 
     // ── 1. Pengeluaran approved dari main_stock ──────────────────────────
-    if (!type_filter || ['all', 'approved', 'manual'].includes(type_filter)) {
-      let userCond     = '';
-      let manualCond   = '';
+    // if (!type_filter || ['all', 'approved', 'manual'].includes(type_filter)) {
+    //   let userCond     = '';
+    //   let manualCond   = '';
 
-      if (uid) {
-        userCond = `AND (sr.user_id = ${uid} OR (sr.id IS NULL AND ms.created_by = ${uid}))`;
-      }
-      if (type_filter === 'manual') {
-        manualCond = `AND ms.source = 'request'`;
-      }
+    //   if (uid) {
+    //     userCond = `AND (sr.user_id = ${uid} OR (sr.id IS NULL AND ms.created_by = ${uid}))`;
+    //   }
+    //   if (type_filter === 'manual') {
+    //     manualCond = `AND ms.source = 'request'`;
+    //   }
 
-      const [rows] = await db.query(`
-        SELECT
-          ms.id,
-          ms.qty,
-          ms.cost_per_unit,
-          ms.total_cost,
-          ms.note,
-          ms.created_at,
-          'approved'  AS request_status,
-          'out'       AS type,
-          si.name     AS item_name,
-          si.unit,
-          creator.name                                             AS created_by_name,
-          approver.name                                            AS approver_name,
-          COALESCE(kasir_u.name, creator.name)                    AS target_user_name,
-          CASE WHEN sr.created_by_admin IS NOT NULL
-               THEN admin_c.name ELSE NULL END                    AS admin_name
-        FROM main_stock ms
-        JOIN  stock_items si         ON ms.stock_item_id = si.id
-        JOIN  users creator          ON ms.created_by    = creator.id
-        LEFT JOIN stock_requests  sr ON sr.id = ms.reference_id AND ms.source = 'request'
-        LEFT JOIN users kasir_u      ON sr.user_id          = kasir_u.id
-        LEFT JOIN users admin_c      ON sr.created_by_admin = admin_c.id
-        LEFT JOIN users approver     ON sr.approved_by      = approver.id
-        WHERE ms.type = 'out'
-          AND DATE(ms.created_at) BETWEEN ? AND ?
-          ${manualCond}
-          ${userCond}
-        ORDER BY ms.created_at DESC
-      `, [from, to]);
+    //   const [rows] = await db.query(`
+    //     SELECT
+    //       ms.id,
+    //       ms.qty,
+    //       ms.cost_per_unit,
+    //       ms.total_cost,
+    //       ms.note,
+    //       ms.created_at,
+    //       'approved'  AS request_status,
+    //       'out'       AS type,
+    //       si.name     AS item_name,
+    //       si.unit,
+    //       creator.name                                             AS created_by_name,
+    //       approver.name                                            AS approver_name,
+    //       COALESCE(kasir_u.name, creator.name)                    AS target_user_name,
+    //       CASE WHEN sr.created_by_admin IS NOT NULL
+    //            THEN admin_c.name ELSE NULL END                    AS admin_name,
+    //       COALESCE(kasir_u.name, creator.name)                    AS stock_owner_name
+    //     FROM main_stock ms
+    //     JOIN  stock_items si         ON ms.stock_item_id = si.id
+    //     JOIN  users creator          ON ms.created_by    = creator.id
+    //     LEFT JOIN stock_requests  sr ON sr.id = ms.reference_id AND ms.source = 'request'
+    //     LEFT JOIN users kasir_u      ON sr.user_id          = kasir_u.id
+    //     LEFT JOIN users admin_c      ON sr.created_by_admin = admin_c.id
+    //     LEFT JOIN users approver     ON sr.approved_by      = approver.id
+    //     WHERE ms.type = 'out'
+    //       AND DATE(ms.created_at) BETWEEN ? AND ?
+    //       ${manualCond}
+    //       ${userCond}
+    //     ORDER BY ms.created_at DESC
+    //   `, [from, to]);
 
-      results.push(...rows);
-    }
+    //   results.push(...rows);
+    // }
+
+    
+    // ── 1. Pengeluaran approved dari main_stock ──────────────────────────
+if (!type_filter || ['all', 'approved', 'manual'].includes(type_filter)) {
+  let userCond   = '';
+  let manualCond = '';
+
+  if (uid) {
+    userCond = `AND (
+      sr.user_id = ${uid}
+      OR (ms.source = 'transaction' AND COALESCE(tx.source_user_id, tx.created_by) = ${uid})
+      OR (ms.source NOT IN ('request','transaction') AND ms.created_by = ${uid})
+    )`;
+  }
+  if (type_filter === 'manual') {
+    manualCond = `AND ms.source = 'request'`;
+  }
+
+  const [rows] = await db.query(`
+    SELECT
+      ms.id,
+      ms.qty,
+      ms.cost_per_unit,
+      ms.total_cost,
+      ms.note,
+      ms.created_at,
+      'approved'  AS request_status,
+      'out'       AS type,
+      si.name     AS item_name,
+      si.unit,
+      creator.name  AS created_by_name,
+      approver.name AS approver_name,
+
+      -- Sumber Stok: siapa pemilik stok yang dipakai
+      -- Jika dari transaksi POS → pakai source_user_id transaksi (kasir pemilik stok)
+      -- Jika dari request → pakai user kasir di stock_requests
+      -- Fallback → creator (yang catat di main_stock)
+      CASE
+        WHEN ms.source = 'transaction'
+          THEN COALESCE(tx_kasir_src.name, tx_kasir.name)
+        WHEN ms.source = 'request'
+          THEN kasir_u.name
+        ELSE creator.name
+      END AS stock_owner_name,
+
+      CASE
+        WHEN ms.source = 'transaction'
+          THEN COALESCE(tx_kasir_src.name, tx_kasir.name)
+        WHEN ms.source = 'request'
+          THEN kasir_u.name
+        ELSE creator.name
+      END AS target_user_name,
+
+      -- Admin name: hanya jika yang catat berbeda dari pemilik stok
+      CASE
+        WHEN ms.source = 'transaction'
+          AND tx.source_user_id IS NOT NULL
+          AND tx.created_by != tx.source_user_id
+          THEN creator.name
+        WHEN ms.source = 'request'
+          AND sr.created_by_admin IS NOT NULL
+          THEN admin_c.name
+        ELSE NULL
+      END AS admin_name
+
+    FROM main_stock ms
+    JOIN  stock_items si         ON ms.stock_item_id = si.id
+    JOIN  users creator          ON ms.created_by    = creator.id
+
+    -- Join ke transactions jika source = transaction
+    LEFT JOIN transactions tx         ON tx.id = ms.reference_id AND ms.source = 'transaction'
+    LEFT JOIN users tx_kasir          ON tx_kasir.id  = tx.created_by
+    LEFT JOIN users tx_kasir_src      ON tx_kasir_src.id = tx.source_user_id
+
+    -- Join ke stock_requests jika source = request
+    LEFT JOIN stock_requests  sr ON sr.id = ms.reference_id AND ms.source = 'request'
+    LEFT JOIN users kasir_u      ON kasir_u.id = sr.user_id
+    LEFT JOIN users admin_c      ON admin_c.id = sr.created_by_admin
+    LEFT JOIN users approver     ON approver.id = sr.approved_by
+
+    WHERE ms.type = 'out'
+      AND DATE(ms.created_at) BETWEEN ? AND ?
+      ${manualCond}
+      ${userCond}
+    ORDER BY ms.created_at DESC
+  `, [from, to]);
+
+  results.push(...rows);
+}
 
     // ── 2. Pengajuan pending & rejected ──────────────────────────────────
     if (!type_filter || ['all', 'pending', 'rejected'].includes(type_filter)) {
@@ -319,7 +409,11 @@ exports.getDaily = async (req, res) => {
           `);
           const piQtyCol = piCols[0]?.COLUMN_NAME || 'qty';
 
-          const userTxCond = uid ? `AND t.${found} = ${uid}` : '';
+          // BUG FIX: Use COALESCE to include both admin-created transactions FOR this kasir (source_user_id)
+          // and kasir's own transactions (created_by). This ensures kasir sees all pengeluaran.
+          const userTxCond = uid
+            ? `AND COALESCE(t.source_user_id, t.${found}) = ${uid}`
+            : '';
 
           const [rows] = await db.query(`
             SELECT
@@ -333,16 +427,25 @@ exports.getDaily = async (req, res) => {
               'transaction' AS type,
               si.name       AS item_name,
               si.unit,
-              kasir_u.name  AS created_by_name,
-              NULL          AS approver_name,
-              kasir_u.name  AS target_user_name,
-              NULL          AS admin_name
+              COALESCE(kasir_src.name, kasir_u.name)        AS created_by_name,
+              creator_u.name                                AS approver_name,
+              COALESCE(kasir_src.name, kasir_u.name)        AS target_user_name,
+              CASE 
+  WHEN t.source_user_id IS NOT NULL 
+   AND t.created_by != t.source_user_id 
+  THEN creator_u.name 
+  ELSE NULL 
+END AS admin_name,
+
+              COALESCE(kasir_src.name, kasir_u.name)        AS stock_owner_name
             FROM transactions t
             JOIN  transaction_items ti    ON ti.transaction_id = t.id
             JOIN  products p              ON p.id              = ti.product_id
             JOIN  product_ingredients pi  ON pi.product_id     = ti.product_id
             JOIN  stock_items si          ON si.id             = pi.stock_item_id
             JOIN  users kasir_u           ON kasir_u.id        = t.${found}
+            LEFT JOIN users kasir_src     ON kasir_src.id      = t.source_user_id
+            LEFT JOIN users creator_u     ON creator_u.id      = t.created_by
             WHERE DATE(t.created_at) BETWEEN ? AND ?
               ${userTxCond}
             ORDER BY t.created_at DESC

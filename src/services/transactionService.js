@@ -240,6 +240,8 @@ exports.createTransaction = async ({ items, payment_method, userId, sourceUserId
         `, [stockOwnerId, ing.stock_item_id]);
 
         // Query 2: Get already-used stock from previous transactions
+        // Use COALESCE to handle cases where kasir makes transaction directly (no source_user_id)
+        // Falls back to created_by if source_user_id is NULL
         const [[used]] = await conn.query(`
           SELECT COALESCE(SUM(ti.qty * pi.qty), 0) AS total
           FROM transaction_items ti
@@ -247,7 +249,7 @@ exports.createTransaction = async ({ items, payment_method, userId, sourceUserId
           JOIN product_ingredients pi
             ON pi.product_id     = ti.product_id
             AND pi.stock_item_id = ?
-          WHERE t.source_user_id = ?
+          WHERE COALESCE(t.source_user_id, t.created_by) = ?
         `, [ing.stock_item_id, stockOwnerId]);
 
         const remainingApproved = Number(approved.total) - Number(used.total);
