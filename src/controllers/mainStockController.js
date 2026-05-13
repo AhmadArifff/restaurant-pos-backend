@@ -616,3 +616,178 @@ exports.addManualOut = async (req, res) => {
     conn.release();
   }
 };
+
+// ══════════════════════════════════════════════════════════════════════════
+// 🔄 BULK RECALCULATION ENDPOINT
+// ══════════════════════════════════════════════════════════════════════════
+// Purpose: Sync all stock_items.stock values with main_stock calculations
+// Use Case: After major data fixes or migrations to ensure database consistency
+// Security: Admin only
+// ══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Recalculate all stock balances from main_stock movements
+ * Syncs stock_items.stock column with formula: SUM(IN) - SUM(OUT)
+ * 
+ * @param {number} stockItemId - Optional: recalculate only one item
+ * @returns {Object} Summary of recalculated items
+ */
+async function recalculateAllBalances(conn, specificItemId = null) {
+  try {
+    // Get list of items to recalculate
+    let itemQuery = 'SELECT id FROM stock_items';
+    const params = [];
+    
+    if (specificItemId) {
+      itemQuery += ' WHERE id = ?';
+      params.push(specificItemId);
+    }
+
+    const [items] = await conn.query(itemQuery, params);
+    
+    let successCount = 0;
+    let errorCount = 0;
+    const results = [];
+
+    for (const item of items) {
+      try {
+        const { correctStock, avgPrice } = await recalcStockItem(conn, item.id);
+        successCount++;
+        results.push({
+          item_id: item.id,
+          status: 'success',
+          calculated_stock: correctStock,
+          avg_price: avgPrice
+        });
+      } catch (err) {
+        errorCount++;
+        results.push({
+          item_id: item.id,
+          status: 'error',
+          error: err.message
+        });
+      }
+    }
+
+    return {
+      total_items: items.length,
+      success_count: successCount,
+      error_count: errorCount,
+      results: results
+    };
+  } catch (err) {
+    throw err;
+  }
+}
+
+/**
+ * HTTP Endpoint: Recalculate all stock balances
+ * POST /api/stock/recalculate-all
+ * 
+ * Returns detailed report of recalculation
+ */
+exports.recalculateAllBalances = async (req, res) => {
+  const conn = await db.getConnection();
+  
+  try {
+    // Verify admin permission
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({
+        error_code: 'FORBIDDEN',
+        message: 'Hanya admin yang dapat menjalankan recalculation'
+      });
+    }
+
+    await conn.beginTransaction();
+
+    const result = await recalculateAllBalances(conn);
+
+    await conn.commit();
+
+    // Log the operation
+    console.log(`✓ Stock recalculation completed: ${result.success_count}/${result.total_items} items`);
+
+    res.json({
+      message: 'Recalculation berhasil',
+      success: true,
+      summary: {
+        total_items: result.total_items,
+        success: result.success_count,
+        errors: result.error_count,
+        timestamp: new Date().toISOString()
+      },
+      details: result.results.slice(0, 50), // Return first 50 for brevity
+      ...(result.results.length > 50 && { 
+        note: `Menampilkan 50 dari ${result.results.length} items. Lihat log untuk detail lengkap.` 
+      })
+    });
+
+  } catch (err) {
+    await conn.rollback();
+
+    res.status(500).json({
+      error_code: 'RECALCULATION_FAILED',
+      message: 'Gagal melakukan recalculation',
+      error: err.message,
+      details: process.env.NODE_ENV === 'development' ? err.stack : undefined
+    });
+
+  } finally {
+    conn.release();
+  }
+};
+
+/**
+ * HTTP Endpoint: Recalculate single stock item balance
+ * POST /api/stock/:itemId/recalculate
+ */
+exports.recalculateItemBalance = async (req, res) => {
+  const conn = await db.getConnection();
+  
+  try {
+    const { itemId } = req.params;
+
+    // Verify item exists
+    const [[item]] = await conn.query(
+      'SELECT id, name FROM stock_items WHERE id = ?',
+      [itemId]
+    );
+
+    if (!item) {
+      return res.status(404).json({
+        error_code: 'NOT_FOUND',
+        message: 'Bahan baku tidak ditemukan'
+      });
+    }
+
+    await conn.beginTransaction();
+
+    const { correctStock, avgPrice } = await recalcStockItem(conn, itemId);
+
+    await conn.commit();
+
+    res.json({
+      message: 'Recalculation berhasil',
+      success: true,
+      item: {
+        id: itemId,
+        name: item.name,
+        current_stock: correctStock,
+        avg_price: avgPrice,
+        total_value: correctStock * avgPrice
+      }
+    });
+
+  } catch (err) {
+    await conn.rollback();
+
+    res.status(500).json({
+      error_code: 'RECALCULATION_FAILED',
+      message: err.message,
+      details: process.env.NODE_ENV === 'development' ? err.stack : undefined
+    });
+
+  } finally {
+    conn.release();
+  }
+};

@@ -194,15 +194,12 @@ exports.getMyStock = async (req, res) => {
         continue;
       }
 
-      // Hitung stok milik kasir ini dari approved requests + warehouse inventory
-      // Stok kasir = (total qty approved + warehouse) - total qty yang sudah dipakai transaksi
+      // Hitung stok milik kasir ini dari approved requests SAJA (bukan warehouse)
+      // Stok kasir = total qty approved - total qty yang sudah dipakai transaksi
       const stockPerItem = {};
 
       for (const ing of ings) {
-        // Stok dari gudang
-        const warehouseStock = ing.stock || 0;
-
-        // Total approved untuk kasir ini
+        // Total approved untuk kasir ini SAJA
         const [[approved]] = await db.query(`
           SELECT COALESCE(SUM(sri.qty_approved), 0) AS total_approved
           FROM stock_requests sr
@@ -223,9 +220,9 @@ exports.getMyStock = async (req, res) => {
           WHERE t.created_by = ?
         `, [ing.stock_item_id, userId]);
 
+        // Stok = approved - used (TIDAK termasuk warehouse stock)
         const approvedStock = Math.max(0, Number(approved.total_approved) - Number(used.total_used));
-        const totalAvailable = warehouseStock + approvedStock;
-        stockPerItem[ing.stock_item_id] = totalAvailable;
+        stockPerItem[ing.stock_item_id] = approvedStock;
       }
 
       // Stok produk = min dari semua bahan / qty per produk
@@ -345,10 +342,7 @@ exports.getStockAllUsers = async (req, res) => {
         let canMake = Infinity;
 
         for (const ing of ings) {
-          // Stok dari gudang (warehouse inventory)
-          const warehouseStock = ing.stock || 0;
-
-          // Total approved untuk user ini
+          // Total approved untuk user ini (dari approved requests SAJA, bukan warehouse)
           const [[approved]] = await db.query(`
             SELECT COALESCE(SUM(sri.qty_approved), 0) AS total
             FROM stock_requests sr
@@ -369,9 +363,9 @@ exports.getStockAllUsers = async (req, res) => {
             WHERE t.created_by = ?
           `, [ing.stock_item_id, u.id]);
 
+          // Stok hanya dari approved requests (TIDAK termasuk warehouse stock)
           const approvedStock = Math.max(0, Number(approved.total) - Number(used.total));
-          const totalAvailable = warehouseStock + approvedStock;
-          canMake = Math.min(canMake, Math.floor(totalAvailable / ing.qty));
+          canMake = Math.min(canMake, Math.floor(approvedStock / ing.qty));
         }
 
         stockByUser.push({

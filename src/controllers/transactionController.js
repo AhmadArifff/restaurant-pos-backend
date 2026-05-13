@@ -3,14 +3,17 @@ const { createTransaction } = require('../services/transactionService');
 
 exports.create = async (req, res) => {
   try {
-    const { items, payment_method } = req.body;
+    const { items, payment_method, sourceUserId } = req.body;
     if (!items || !items.length)
       return res.status(400).json({ message: 'Items tidak boleh kosong' });
 
+    // sourceUserId: ketika admin membuat transaksi dari kasir tertentu
+    // jika tidak ada, berarti kasir membuat transaksi sendiri
     const result = await createTransaction({
       items,
       payment_method: payment_method || 'cash',
-      userId: req.user.id
+      userId: req.user.id,
+      sourceUserId: sourceUserId || null
     });
 
     res.status(201).json({ message: 'Transaksi berhasil', ...result });
@@ -21,16 +24,40 @@ exports.create = async (req, res) => {
 
 exports.getAll = async (req, res) => {
   try {
-    const { date, limit = 50 } = req.query;
+    const { dateFrom, dateTo, search, limit = 100 } = req.query;
     let sql = `
-      SELECT t.*, u.name AS kasir_name
+      SELECT 
+        t.id,
+        t.invoice_number,
+        t.total_price,
+        t.payment_method,
+        t.created_at,
+        u_creator.id AS creator_id,
+        u_creator.name AS creator_name,
+        u_creator.role AS creator_role,
+        u_source.id AS source_user_id,
+        u_source.name AS source_user_name,
+        u_source.role AS source_user_role
       FROM transactions t
-      LEFT JOIN users u ON t.created_by = u.id
+      LEFT JOIN users u_creator ON t.created_by = u_creator.id
+      LEFT JOIN users u_source ON t.source_user_id = u_source.id
       WHERE 1=1
     `;
     const params = [];
 
-    if (date) { sql += ' AND DATE(t.created_at) = ?'; params.push(date); }
+    if (dateFrom) { 
+      sql += ' AND DATE(t.created_at) >= ?'; 
+      params.push(dateFrom); 
+    }
+    if (dateTo) { 
+      sql += ' AND DATE(t.created_at) <= ?'; 
+      params.push(dateTo); 
+    }
+    if (search) { 
+      sql += ' AND (t.invoice_number LIKE ? OR u_creator.name LIKE ? OR u_source.name LIKE ?)'; 
+      params.push(`%${search}%`, `%${search}%`, `%${search}%`); 
+    }
+    
     sql += ' ORDER BY t.created_at DESC LIMIT ?';
     params.push(Number(limit));
 

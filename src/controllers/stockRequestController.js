@@ -163,33 +163,58 @@ exports.getMyRequests = async (req, res) => {
   } catch (err) { res.status(500).json({ message: err.message }); }
 };
 
-// ── Admin: approve / reject ───────────────────────────────────
+// ── Admin: approve / reject ──────────────────────────────────────────────
+// Enhanced with atomic transaction and approval notes for audit trail
 exports.approveRequest = async (req, res) => {
   const conn = await db.getConnection();
   try {
+    // ⭕ BEGIN TRANSACTION - all approval operations are atomic
     await conn.beginTransaction();
-    const { id } = req.params;
-    const { action, approved_items } = req.body;
 
+    const { id } = req.params;
+    const { action, approved_items, approval_notes } = req.body;
+    const adminId = req.user.id;
+
+    // ── Validation: Check request exists and is pending
     const [[request]] = await conn.query(
-      'SELECT * FROM stock_requests WHERE id = ?', [id]
+      'SELECT id, status, user_id FROM stock_requests WHERE id = ?', 
+      [id]
     );
+
     if (!request) {
       await conn.rollback();
-      return res.status(404).json({ message: 'Tidak ditemukan' });
+      return res.status(404).json({ 
+        error_code: 'NOT_FOUND',
+        message: 'Pengajuan tidak ditemukan' 
+      });
     }
+
     if (request.status !== 'pending') {
       await conn.rollback();
-      return res.status(400).json({ message: 'Sudah diproses' });
+      return res.status(400).json({ 
+        error_code: 'ALREADY_PROCESSED',
+        message: `Pengajuan sudah diproses (status: ${request.status})` 
+      });
     }
 
-    const status = action === 'approve' ? 'approved' : 'rejected';
+    // ── Process approval/rejection
+    const newStatus = action === 'approve' ? 'approved' : 'rejected';
+
+    // Update request with approval info
     await conn.query(`
       UPDATE stock_requests
-      SET status = ?, approved_by = ?, approved_at = NOW()
+      SET 
+        status = ?,
+        approved_by = ?,
+        approved_at = NOW(),
+        approval_notes = ?
       WHERE id = ?
-    `, [status, req.user.id, id]);
+    `, [newStatus, adminId, approval_notes || null, id]);
 
+    // ── If approving, update item approvals
+    // IMPORTANT: We DO NOT deduct from main_stock here!
+    // Stock deductions only happen when actual transaction occurs
+    // This maintains single source of truth in main_stock table
     if (action === 'approve' && approved_items?.length) {
       for (const ai of approved_items) {
         await conn.query(
@@ -197,36 +222,43 @@ exports.approveRequest = async (req, res) => {
           [ai.qty_approved, ai.request_item_id]
         );
 
-        const [[item]] = await conn.query(
-          'SELECT * FROM stock_request_items WHERE id = ?',
-          [ai.request_item_id]
-        );
-
-        if (item && Number(ai.qty_approved) > 0) {
-          // Catat keluar dari main_stock
-          await conn.query(`
-            INSERT INTO main_stock
-              (stock_item_id, qty, cost_per_unit, type, source, reference_id, note, created_by)
-            VALUES (?, ?, ?, 'out', 'request', ?, ?, ?)
-          `, [
-            item.stock_item_id, ai.qty_approved, item.cost_per_unit,
-            id, `Pengajuan #${id}`, req.user.id
-          ]);
-
-          // Kurangi stock_items
-          await conn.query(
-            'UPDATE stock_items SET stock = GREATEST(0, stock - ?) WHERE id = ?',
-            [ai.qty_approved, item.stock_item_id]
-          );
-        }
+        // Optional: Create audit log entry
+        await conn.query(`
+          INSERT INTO stock_request_audit 
+            (request_id, action, approved_qty, approved_by, note, created_at)
+          VALUES (?, 'approved', ?, ?, ?, NOW())
+        `, [
+          id, 
+          ai.qty_approved, 
+          adminId,
+          `Approved by ${req.user.name || 'Admin'}`
+        ]).catch(() => {
+          // Audit table may not exist, fail silently
+        });
       }
     }
 
+    // ⭕ COMMIT - all approval changes succeed atomically
     await conn.commit();
-    res.json({ message: `Pengajuan ${status}` });
+
+    res.json({ 
+      message: `Pengajuan ${newStatus}`,
+      success: true,
+      request_id: id,
+      status: newStatus,
+      approved_at: new Date().toISOString()
+    });
+
   } catch (err) {
+    // 🔙 ROLLBACK on any error
     await conn.rollback();
-    res.status(500).json({ message: err.message });
+    
+    res.status(err.status_code || 500).json({
+      error_code: 'APPROVAL_FAILED',
+      message: err.message || 'Gagal memproses pengajuan',
+      details: process.env.NODE_ENV === 'development' ? err.stack : undefined
+    });
+
   } finally {
     conn.release();
   }
