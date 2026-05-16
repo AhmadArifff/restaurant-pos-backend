@@ -16,15 +16,26 @@ exports.create = async (req, res) => {
       sourceUserId: sourceUserId || null
     });
 
-    res.status(201).json({ message: 'Transaksi berhasil', ...result });
+    res.status(201).json({ 
+      message: 'Transaksi berhasil', 
+      data: result 
+    });
   } catch (err) {
-    res.status(400).json({ message: err.message });
+    console.error('Transaction creation error:', err.message);
+    res.status(err.status_code || 400).json({ 
+      message: err.message,
+      validation_errors: err.validation_errors || undefined
+    });
   }
 };
 
 exports.getAll = async (req, res) => {
   try {
     const { dateFrom, dateTo, search, limit = 100 } = req.query;
+    
+    // Logging untuk debug
+    console.log('Fetching transactions:', { dateFrom, dateTo, search, limit });
+    
     let sql = `
       SELECT 
         t.id,
@@ -62,8 +73,12 @@ exports.getAll = async (req, res) => {
     params.push(Number(limit));
 
     const [rows] = await db.query(sql, params);
+    
+    console.log(`Found ${rows.length} transactions`);
+    
     res.json(rows);
   } catch (err) {
+    console.error('Transaction fetch error:', err.message);
     res.status(500).json({ message: err.message });
   }
 };

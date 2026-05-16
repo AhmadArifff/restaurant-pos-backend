@@ -20,6 +20,7 @@ app.use('/api/attendance', require('./routes/attendance'));
 app.use('/api/main-stock',     require('./routes/mainStock'));
 app.use('/api/stock-requests', require('./routes/stockRequests'));
 app.use('/api/settings',       require('./routes/settings'));       // ← website settings
+app.use('/api/ai-chat',      require('./routes/geminiAI'));       // ← AI Chat dengan Gemini
 
 app.use((req, res) => res.status(404).json({ message: 'Endpoint tidak ditemukan' }));
 app.use((err, req, res, next) => {
